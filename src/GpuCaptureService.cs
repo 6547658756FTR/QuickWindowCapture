@@ -232,6 +232,8 @@ namespace QuickWindowCapture
             private bool hasFrame;
             private string failure;
             private bool resetRequired;
+            private int disposeRequested;
+            private int resourcesReleased;
 
             internal Rectangle DesktopBounds { get; private set; }
 
@@ -446,67 +448,77 @@ namespace QuickWindowCapture
 
             private void UpdateLoop()
             {
-                while (running)
+                try
                 {
-                    DxgiNative.FrameInformation frameInformation;
-                    IntPtr desktopResource = IntPtr.Zero;
-                    int result = acquireNextFrame(duplication, 100, out frameInformation, out desktopResource);
-
-                    if (result == DxgiNative.DXGI_ERROR_WAIT_TIMEOUT)
+                    while (running)
                     {
-                        continue;
-                    }
+                        DxgiNative.FrameInformation frameInformation;
+                        IntPtr desktopResource = IntPtr.Zero;
+                        int result = acquireNextFrame(duplication, 100, out frameInformation, out desktopResource);
 
-                    if (result < 0)
-                    {
-                        lock (sync)
+                        if (result == DxgiNative.DXGI_ERROR_WAIT_TIMEOUT)
                         {
-                            resetRequired = true;
-                            failure = result == DxgiNative.DXGI_ERROR_ACCESS_LOST
-                                ? "화면 모드가 변경되어 고속 캡처 연결이 끊겼습니다. 일반 모드로 바꾸거나 앱을 다시 실행해 주세요."
-                                : "고속 캡처 프레임을 받지 못했습니다.";
+                            continue;
                         }
-                        break;
-                    }
 
-                    IntPtr acquiredTexture = IntPtr.Zero;
-                    try
-                    {
-                        Guid textureId = typeof(DxgiNative.ID3D11Texture2D).GUID;
-                        result = Marshal.QueryInterface(desktopResource, ref textureId, out acquiredTexture);
-                        DxgiNative.ThrowIfFailed(result, "GPU 화면 형식을 읽지 못했습니다.");
+                        if (result < 0)
+                        {
+                            lock (sync)
+                            {
+                                resetRequired = true;
+                                failure = result == DxgiNative.DXGI_ERROR_ACCESS_LOST
+                                    ? "화면 모드가 변경되어 고속 캡처 연결이 끊겼습니다."
+                                    : "고속 캡처 프레임을 받지 못했습니다.";
+                            }
+                            break;
+                        }
 
-                        lock (sync)
+                        IntPtr acquiredTexture = IntPtr.Zero;
+                        try
                         {
-                            EnsureLatestTexture(acquiredTexture);
-                            copyResource(context, latestTexture, acquiredTexture);
-                            hasFrame = true;
-                        }
-                    }
-                    catch (Exception exception)
-                    {
-                        lock (sync)
-                        {
-                            resetRequired = true;
-                            failure = exception.Message;
-                        }
-                        break;
-                    }
-                    finally
-                    {
-                        releaseFrame(duplication);
-                        if (desktopResource != IntPtr.Zero)
-                        {
-                            Marshal.Release(desktopResource);
-                        }
-                        if (acquiredTexture != IntPtr.Zero)
-                        {
-                            Marshal.Release(acquiredTexture);
-                        }
-                    }
+                            Guid textureId = typeof(DxgiNative.ID3D11Texture2D).GUID;
+                            result = Marshal.QueryInterface(desktopResource, ref textureId, out acquiredTexture);
+                            DxgiNative.ThrowIfFailed(result, "GPU 화면 형식을 읽지 못했습니다.");
 
-                    // Avoid consuming unnecessary GPU time on very high-refresh displays.
-                    Thread.Sleep(12);
+                            lock (sync)
+                            {
+                                EnsureLatestTexture(acquiredTexture);
+                                copyResource(context, latestTexture, acquiredTexture);
+                                hasFrame = true;
+                            }
+                        }
+                        catch (Exception exception)
+                        {
+                            lock (sync)
+                            {
+                                resetRequired = true;
+                                failure = exception.Message;
+                            }
+                            break;
+                        }
+                        finally
+                        {
+                            releaseFrame(duplication);
+                            if (desktopResource != IntPtr.Zero)
+                            {
+                                Marshal.Release(desktopResource);
+                            }
+                            if (acquiredTexture != IntPtr.Zero)
+                            {
+                                Marshal.Release(acquiredTexture);
+                            }
+                        }
+
+                        // Avoid consuming unnecessary GPU time on very high-refresh displays.
+                        Thread.Sleep(12);
+                    }
+                }
+                finally
+                {
+                    if (Interlocked.CompareExchange(ref disposeRequested, 0, 0) != 0)
+                    {
+                        ReleaseResources();
+                    }
                 }
             }
 
@@ -550,10 +562,30 @@ namespace QuickWindowCapture
 
             public void Dispose()
             {
+                Interlocked.Exchange(ref disposeRequested, 1);
                 running = false;
                 if (updateThread != null && updateThread.IsAlive)
                 {
                     updateThread.Join(350);
+                }
+
+                if (updateThread != null && updateThread.IsAlive)
+                {
+                    // A wedged graphics driver must not be given COM pointers that
+                    // another thread has already released. The update thread will
+                    // release them itself if it eventually returns.
+                    DiagnosticLog.Write("GPU 갱신 스레드 종료가 지연되어 리소스 해제를 보류했습니다.");
+                    return;
+                }
+
+                ReleaseResources();
+            }
+
+            private void ReleaseResources()
+            {
+                if (Interlocked.Exchange(ref resourcesReleased, 1) != 0)
+                {
+                    return;
                 }
 
                 lock (sync)

@@ -20,10 +20,17 @@ namespace QuickWindowCapture
         private RawInputMonitor rawInputMonitor;
         private AppSettings settings;
         private SettingsForm settingsForm;
-        private GpuCaptureService gpuCapture;
+        private CaptureWorker captureWorker;
+        private volatile int captureWorkerGeneration;
+        private int recentCaptureTimeouts;
+        private long lastCaptureTimeoutTimestamp;
         private int pendingSaves;
         private long lastCaptureSignalTimestamp;
-        private bool exiting;
+        private long lastQueueDropLogTimestamp;
+        private volatile bool exiting;
+
+        private const int CaptureWorkerTimeoutMilliseconds = 1500;
+        private const int RepeatedTimeoutWindowMilliseconds = 60000;
 
         internal TrayApplicationContext(bool showSettingsOnStart, EventWaitHandle showEvent)
         {
@@ -31,10 +38,11 @@ namespace QuickWindowCapture
             settings = AppSettings.Load();
             iconResource = IconResource.Create();
             captureSound = new CaptureSound();
-            ConfigureGpuCapture();
 
             dispatcher = new Control();
             dispatcher.CreateControl();
+            ReplaceCaptureWorker(false, null);
+            DiagnosticLog.Write("빠른 창 캡처 1.6.4 시작");
 
             ContextMenuStrip menu = new ContextMenuStrip();
             ToolStripMenuItem statusItem = new ToolStripMenuItem("단축키: " + settings.GetHotkeyDisplayName());
@@ -138,81 +146,96 @@ namespace QuickWindowCapture
                 lastCaptureSignalTimestamp = timestamp;
             }
 
-            try
+            CaptureWorker worker = captureWorker;
+            if (worker == null || !worker.TryEnqueue(windowHandle, settings))
             {
-                dispatcher.BeginInvoke(new Action<IntPtr>(CaptureWindow), windowHandle);
-            }
-            catch (InvalidOperationException)
-            {
+                LogDroppedCaptureRequest(timestamp);
             }
         }
 
-        private void CaptureWindow(IntPtr windowHandle)
+        private void LogDroppedCaptureRequest(long timestamp)
         {
-            if (Interlocked.CompareExchange(ref pendingSaves, 0, 0) >= 3)
+            lock (captureSignalLock)
             {
-                ShowCaptureError("이미지를 저장하는 중입니다. 잠시 후 다시 시도해 주세요.");
+                if (lastQueueDropLogTimestamp != 0)
+                {
+                    long elapsed = timestamp - lastQueueDropLogTimestamp;
+                    if (elapsed >= 0 && elapsed * 1000 / Stopwatch.Frequency < 5000)
+                    {
+                        return;
+                    }
+                }
+
+                lastQueueDropLogTimestamp = timestamp;
+            }
+
+            DiagnosticLog.Write("캡처 요청이 대기열 제한으로 생략되었습니다.");
+        }
+
+        private void CaptureCompleted(
+            int workerGeneration,
+            Bitmap bitmap,
+            AppSettings requestSettings,
+            long elapsedMilliseconds)
+        {
+            if (exiting || workerGeneration != captureWorkerGeneration)
+            {
+                bitmap.Dispose();
                 return;
             }
 
-            Bitmap bitmap = null;
-            try
+            if (elapsedMilliseconds >= 250)
             {
-                if (settings.CaptureMode == CaptureMode.Compatibility)
+                DiagnosticLog.Write("느린 캡처 감지: " + elapsedMilliseconds + "ms");
+            }
+
+            int saveCount = Interlocked.Increment(ref pendingSaves);
+            if (saveCount > 3)
+            {
+                Interlocked.Decrement(ref pendingSaves);
+                bitmap.Dispose();
+                BeginOnUi(delegate
                 {
-                    bitmap = ScreenshotService.CaptureVisibleWindowBitmap(windowHandle);
-                }
-                else
+                    ShowCaptureError("이미지를 저장하는 중입니다. 잠시 후 다시 시도해 주세요.");
+                });
+                return;
+            }
+
+            if (requestSettings.CaptureSoundEnabled)
+            {
+                BeginOnUi(delegate
                 {
-                    try
+                    if (!exiting)
                     {
-                        if (gpuCapture == null || !gpuCapture.IsAvailable)
-                        {
-                            throw new InvalidOperationException(
-                                gpuCapture == null
-                                    ? "고속 캡처 엔진이 시작되지 않았습니다."
-                                    : gpuCapture.UnavailableReason);
-                        }
-
-                        bitmap = CaptureGpuWindowWithRecovery(windowHandle);
+                        captureSound.Play(
+                            requestSettings.CaptureSoundId,
+                            requestSettings.CaptureSoundOverlapEnabled);
                     }
-                    catch
-                    {
-                        if (settings.CaptureMode == CaptureMode.HighSpeed)
-                        {
-                            throw;
-                        }
-
-                        bitmap = ScreenshotService.CaptureVisibleWindowBitmap(windowHandle);
-                    }
-                }
-
-                if (settings.CaptureSoundEnabled)
-                {
-                    captureSound.Play(
-                        settings.CaptureSoundId,
-                        settings.CaptureSoundOverlapEnabled);
-                }
-
-                QueueSave(bitmap, settings.SaveFolder);
-                bitmap = null;
+                });
             }
-            catch (Exception exception)
+
+            QueueSave(bitmap, requestSettings.SaveFolder);
+        }
+
+        private void CaptureFailed(int workerGeneration, string message)
+        {
+            if (exiting || workerGeneration != captureWorkerGeneration)
             {
-                ShowCaptureError(exception.Message);
+                return;
             }
-            finally
+
+            DiagnosticLog.Write("캡처 실패: " + message);
+            BeginOnUi(delegate
             {
-                if (bitmap != null)
+                if (!exiting && workerGeneration == captureWorkerGeneration)
                 {
-                    bitmap.Dispose();
+                    ShowCaptureError(message);
                 }
-            }
+            });
         }
 
         private void QueueSave(Bitmap bitmap, string saveFolder)
         {
-            Interlocked.Increment(ref pendingSaves);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 try
@@ -229,30 +252,6 @@ namespace QuickWindowCapture
                     Interlocked.Decrement(ref pendingSaves);
                 }
             });
-        }
-
-        private Bitmap CaptureGpuWindowWithRecovery(IntPtr windowHandle)
-        {
-            try
-            {
-                return gpuCapture.CaptureWindow(windowHandle);
-            }
-            catch (GpuCaptureResetRequiredException)
-            {
-                // Full-screen, resolution, HDR and monitor changes can invalidate
-                // Desktop Duplication. Recreate it immediately so the next frame
-                // does not require restarting the tray application.
-                ConfigureGpuCapture();
-                if (gpuCapture == null || !gpuCapture.IsAvailable)
-                {
-                    throw new InvalidOperationException(
-                        gpuCapture == null
-                            ? "고속 캡처 엔진을 다시 시작하지 못했습니다."
-                            : gpuCapture.UnavailableReason);
-                }
-
-                return gpuCapture.CaptureWindow(windowHandle);
-            }
         }
 
         private void ShowCaptureError(string message)
@@ -309,6 +308,7 @@ namespace QuickWindowCapture
         {
             bool shouldRestartElevated = updatedSettings.RunAsAdministrator &&
                 !PrivilegeManager.IsAdministrator();
+            CaptureMode previousMode = settings.CaptureMode;
             settings = updatedSettings.Copy();
             keyboardHook.UpdateSettings(settings);
             if (rawInputMonitor != null)
@@ -319,7 +319,16 @@ namespace QuickWindowCapture
             {
                 lastCaptureSignalTimestamp = 0;
             }
-            ConfigureGpuCapture();
+            if (previousMode != settings.CaptureMode)
+            {
+                recentCaptureTimeouts = 0;
+                lastCaptureTimeoutTimestamp = 0;
+                ReplaceCaptureWorker(false, null);
+            }
+            else if (captureWorker != null)
+            {
+                captureWorker.UpdateSettings(settings);
+            }
             trayIcon.Text = BuildTrayText(settings);
 
             ToolStripItem status = trayIcon.ContextMenuStrip.Items["HotkeyStatus"];
@@ -361,17 +370,26 @@ namespace QuickWindowCapture
                 MessageBoxIcon.Information);
         }
 
-        private void ConfigureGpuCapture()
+        private void ReplaceCaptureWorker(bool forceCompatibility, string reason)
         {
-            if (gpuCapture != null)
+            CaptureWorker previous = captureWorker;
+            if (previous != null)
             {
-                gpuCapture.Dispose();
-                gpuCapture = null;
+                previous.Retire();
             }
 
-            if (settings.CaptureMode != CaptureMode.Compatibility)
+            captureWorkerGeneration++;
+            captureWorker = new CaptureWorker(
+                captureWorkerGeneration,
+                settings,
+                forceCompatibility,
+                CaptureCompleted,
+                CaptureFailed);
+
+            if (!string.IsNullOrEmpty(reason))
             {
-                gpuCapture = new GpuCaptureService();
+                DiagnosticLog.Write(reason + " 새 작업자=" + captureWorkerGeneration +
+                    (forceCompatibility ? " 자동 모드 일반 캡처 전환" : " GPU 엔진 재시작"));
             }
         }
 
@@ -403,6 +421,39 @@ namespace QuickWindowCapture
             {
                 ShowSettings();
             }
+
+            MonitorCaptureWorker();
+        }
+
+        private void MonitorCaptureWorker()
+        {
+            CaptureWorker worker = captureWorker;
+            if (worker == null || !worker.HasTimedOut(CaptureWorkerTimeoutMilliseconds))
+            {
+                return;
+            }
+
+            long now = Stopwatch.GetTimestamp();
+            if (lastCaptureTimeoutTimestamp == 0 || now < lastCaptureTimeoutTimestamp ||
+                (now - lastCaptureTimeoutTimestamp) * 1000 / Stopwatch.Frequency >
+                    RepeatedTimeoutWindowMilliseconds)
+            {
+                recentCaptureTimeouts = 0;
+            }
+
+            recentCaptureTimeouts++;
+            lastCaptureTimeoutTimestamp = now;
+            bool forceCompatibility = settings.CaptureMode == CaptureMode.Automatic &&
+                recentCaptureTimeouts >= 2;
+
+            ReplaceCaptureWorker(
+                forceCompatibility,
+                "캡처 작업자가 " + CaptureWorkerTimeoutMilliseconds + "ms 동안 응답하지 않았습니다.");
+
+            ShowCaptureError(
+                forceCompatibility
+                    ? "고속 캡처가 반복해서 지연되어 이번 실행에서는 일반 방식으로 자동 전환했습니다."
+                    : "캡처 엔진 응답이 지연되어 자동으로 다시 시작했습니다. 이번 한 장은 저장되지 않았을 수 있습니다.");
         }
 
         private void ExitApplication()
@@ -420,10 +471,10 @@ namespace QuickWindowCapture
                 rawInputMonitor.Dispose();
                 rawInputMonitor = null;
             }
-            if (gpuCapture != null)
+            if (captureWorker != null)
             {
-                gpuCapture.Dispose();
-                gpuCapture = null;
+                captureWorker.Dispose();
+                captureWorker = null;
             }
             trayIcon.Visible = false;
 

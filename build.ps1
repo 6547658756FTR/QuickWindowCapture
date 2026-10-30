@@ -18,7 +18,7 @@ New-Item -ItemType Directory -Path $outputFolder -Force | Out-Null
 New-Item -ItemType Directory -Path $objectFolder -Force | Out-Null
 
 $sources = Get-ChildItem -LiteralPath $sourceFolder -Filter "*.cs" | Select-Object -ExpandProperty FullName
-$outputFile = Join-Path $outputFolder "QuickWindowCapture-v1.6.3.exe"
+$outputFile = Join-Path $outputFolder "QuickWindowCapture-v1.6.4.exe"
 $manifest = Join-Path $projectRoot "app.manifest"
 $iconFile = Join-Path $objectFolder "QuickWindowCapture.ico"
 $frameworkFolder = Split-Path -Parent $compiler
