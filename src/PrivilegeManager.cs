@@ -10,9 +10,6 @@ namespace QuickWindowCapture
 {
     internal static class PrivilegeManager
     {
-        internal const string ElevatedArgument = "--elevated";
-        private const string WaitForProcessArgument = "--wait-for-process";
-
         internal static bool IsAdministrator()
         {
             try
@@ -29,66 +26,39 @@ namespace QuickWindowCapture
             }
         }
 
-        internal static void WaitForPreviousInstance(string[] args)
+        internal static bool TryStartElevatedInputHelper(
+            string pipeName,
+            int parentProcessId,
+            out Process helperProcess,
+            out string errorMessage)
         {
-            for (int index = 0; index < args.Length - 1; index++)
-            {
-                if (!string.Equals(args[index], WaitForProcessArgument, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                int processId;
-                if (!int.TryParse(args[index + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out processId) ||
-                    processId <= 0 || processId == Process.GetCurrentProcess().Id)
-                {
-                    return;
-                }
-
-                try
-                {
-                    using (Process previous = Process.GetProcessById(processId))
-                    {
-                        previous.WaitForExit(15000);
-                    }
-                }
-                catch (ArgumentException)
-                {
-                }
-                catch (InvalidOperationException)
-                {
-                }
-
-                return;
-            }
-        }
-
-        internal static bool TryRestartAsAdministrator(bool startHidden, out string errorMessage)
-        {
+            helperProcess = null;
             errorMessage = null;
             if (IsAdministrator())
             {
-                return true;
+                errorMessage = "앱 전체가 이미 관리자 권한으로 실행 중입니다.";
+                return false;
             }
 
-            string arguments = ElevatedArgument +
-                " " + WaitForProcessArgument +
-                " " + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
-            if (startHidden)
-            {
-                arguments += " --startup";
-            }
+            string arguments = "--input-helper --pipe " + pipeName +
+                " --parent " + parentProcessId.ToString(CultureInfo.InvariantCulture);
 
             try
             {
-                Process.Start(new ProcessStartInfo
+                helperProcess = Process.Start(new ProcessStartInfo
                 {
                     FileName = Application.ExecutablePath,
                     Arguments = arguments,
                     WorkingDirectory = Path.GetDirectoryName(Application.ExecutablePath),
                     UseShellExecute = true,
-                    Verb = "runas"
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden
                 });
+                if (helperProcess == null)
+                {
+                    errorMessage = "관리자 입력 도우미 프로세스를 시작하지 못했습니다.";
+                    return false;
+                }
                 return true;
             }
             catch (Win32Exception exception)

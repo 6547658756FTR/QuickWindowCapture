@@ -16,10 +16,15 @@ namespace QuickWindowCapture
             // no private DLL dependencies, so every P/Invoke is restricted to the
             // trusted Windows system directory before UI or capture components load.
             NativeMethods.RequireSystemDllSearchOnly();
-            PrivilegeManager.WaitForPreviousInstance(args);
             NativeMethods.EnableBestDpiAwareness();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            if (ElevatedInputHelper.IsHelperInvocation(args))
+            {
+                ElevatedInputHelper.Run(args);
+                return;
+            }
 
             bool eventCreated;
             using (EventWaitHandle showEvent = new EventWaitHandle(
@@ -38,28 +43,6 @@ namespace QuickWindowCapture
                     }
 
                     bool startedByWindows = HasArgument(args, "--startup");
-                    bool elevationRequested = AppSettings.Load().RunAsAdministrator &&
-                        !PrivilegeManager.IsAdministrator() &&
-                        !HasArgument(args, PrivilegeManager.ElevatedArgument);
-                    if (elevationRequested)
-                    {
-                        string elevationError;
-                        if (PrivilegeManager.TryRestartAsAdministrator(startedByWindows, out elevationError))
-                        {
-                            return;
-                        }
-
-                        if (!startedByWindows && !string.IsNullOrEmpty(elevationError))
-                        {
-                            MessageBox.Show(
-                                "관리자 호환 모드로 시작하지 못했습니다. 일반 권한으로 계속 실행합니다.\r\n\r\n" +
-                                elevationError,
-                                "빠른 창 캡처",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Information);
-                        }
-                    }
-
                     using (TrayApplicationContext context = new TrayApplicationContext(!startedByWindows, showEvent))
                     {
                         Application.Run(context);

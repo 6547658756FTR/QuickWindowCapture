@@ -21,6 +21,9 @@ namespace QuickWindowCapture
         private AppSettings settings;
         private SettingsForm settingsForm;
         private CaptureWorker captureWorker;
+        private ElevatedInputBridge elevatedInputBridge;
+        private string inputPrivilegeState;
+        private int elevatedInputBridgeGeneration;
         private volatile int captureWorkerGeneration;
         private int recentCaptureTimeouts;
         private long lastCaptureTimeoutTimestamp;
@@ -42,7 +45,10 @@ namespace QuickWindowCapture
             dispatcher = new Control();
             dispatcher.CreateControl();
             ReplaceCaptureWorker(false, null);
-            DiagnosticLog.Write("빠른 창 캡처 1.7.0 시작");
+            DiagnosticLog.Write("빠른 창 캡처 2.0.0 시작");
+            inputPrivilegeState = PrivilegeManager.IsAdministrator()
+                ? "앱 전체가 관리자 권한"
+                : "일반 권한";
 
             ContextMenuStrip menu = new ContextMenuStrip();
             ToolStripMenuItem statusItem = new ToolStripMenuItem("단축키: " + settings.GetHotkeyDisplayName());
@@ -54,17 +60,18 @@ namespace QuickWindowCapture
             modeItem.Name = "CaptureModeStatus";
             menu.Items.Add(modeItem);
             ToolStripMenuItem privilegeItem = new ToolStripMenuItem(
-                "권한: " + (PrivilegeManager.IsAdministrator() ? "관리자" : "일반"));
+                "입력 권한: " + inputPrivilegeState);
             privilegeItem.Enabled = false;
-            privilegeItem.Name = "PrivilegeStatus";
+            privilegeItem.Name = "InputPrivilegeStatus";
             menu.Items.Add(privilegeItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("설정 열기", null, delegate { ShowSettings(); });
             menu.Items.Add("저장 폴더 열기", null, delegate { OpenSaveFolder(); });
             ToolStripMenuItem elevateItem = new ToolStripMenuItem(
-                "관리자 권한으로 다시 시작",
+                "관리자 입력 도우미 시작",
                 null,
-                delegate { RestartAsAdministrator(); });
+                delegate { StartElevatedInputHelper(true); });
+            elevateItem.Name = "ElevatedInputAction";
             elevateItem.Enabled = !PrivilegeManager.IsAdministrator();
             menu.Items.Add(elevateItem);
             menu.Items.Add(new ToolStripSeparator());
@@ -111,6 +118,11 @@ namespace QuickWindowCapture
                     "빠른 창 캡처",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+            }
+
+            if (settings.RunAsAdministrator && !PrivilegeManager.IsAdministrator())
+            {
+                StartElevatedInputHelper(false);
             }
 
             eventTimer = new System.Windows.Forms.Timer();
@@ -306,8 +318,6 @@ namespace QuickWindowCapture
 
         private void ApplySettings(AppSettings updatedSettings)
         {
-            bool shouldRestartElevated = updatedSettings.RunAsAdministrator &&
-                !PrivilegeManager.IsAdministrator();
             CaptureMode previousMode = settings.CaptureMode;
             settings = updatedSettings.Copy();
             keyboardHook.UpdateSettings(settings);
@@ -343,31 +353,148 @@ namespace QuickWindowCapture
                 modeStatus.Text = "방식: " + settings.GetCaptureModeDisplayName();
             }
 
-            if (shouldRestartElevated)
+            if (PrivilegeManager.IsAdministrator())
             {
-                BeginOnUi(RestartAsAdministrator);
+                inputPrivilegeState = "앱 전체가 관리자 권한";
+                StopElevatedInputHelper();
+                UpdateInputPrivilegeMenu();
+            }
+            else if (settings.RunAsAdministrator)
+            {
+                if (elevatedInputBridge == null)
+                {
+                    BeginOnUi(delegate { StartElevatedInputHelper(true); });
+                }
+                else
+                {
+                    elevatedInputBridge.UpdateSettings(settings);
+                }
+            }
+            else
+            {
+                StopElevatedInputHelper();
+                inputPrivilegeState = "일반 권한";
+                UpdateInputPrivilegeMenu();
             }
         }
 
-        private void RestartAsAdministrator()
+        private void StartElevatedInputHelper(bool showErrorDialog)
         {
             if (PrivilegeManager.IsAdministrator())
             {
+                inputPrivilegeState = "앱 전체가 관리자 권한";
+                UpdateInputPrivilegeMenu();
                 return;
             }
+
+            StopElevatedInputHelper();
+            int bridgeGeneration = ++elevatedInputBridgeGeneration;
+            ElevatedInputBridge bridge = new ElevatedInputBridge(
+                settings,
+                QueueCapture,
+                delegate(bool connected, string state)
+                {
+                    ElevatedInputStateChanged(bridgeGeneration, connected, state);
+                },
+                delegate(string message)
+                {
+                    ElevatedInputError(bridgeGeneration, message);
+                });
+            elevatedInputBridge = bridge;
+            inputPrivilegeState = "관리자 입력 도우미 연결 중";
+            UpdateInputPrivilegeMenu();
 
             string errorMessage;
-            if (PrivilegeManager.TryRestartAsAdministrator(true, out errorMessage))
+            if (bridge.Start(out errorMessage))
             {
-                ExitApplication();
                 return;
             }
 
-            MessageBox.Show(
-                "관리자 권한으로 다시 시작하지 못했습니다.\r\n\r\n" + errorMessage,
-                "빠른 창 캡처",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            if (elevatedInputBridge == bridge)
+            {
+                elevatedInputBridge = null;
+            }
+            bridge.Dispose();
+            inputPrivilegeState = "일반 권한 (도우미 미연결)";
+            UpdateInputPrivilegeMenu();
+            DiagnosticLog.Write("관리자 입력 도우미 시작 실패: " + errorMessage);
+            if (showErrorDialog)
+            {
+                MessageBox.Show(
+                    "관리자 입력 도우미를 시작하지 못했습니다. 일반 입력 감지는 계속 동작합니다.\r\n\r\n" +
+                    errorMessage,
+                    "빠른 창 캡처",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else
+            {
+                ShowCaptureError("관리자 입력 도우미를 시작하지 못했습니다. 일반 입력 감지는 계속 동작합니다.");
+            }
+        }
+
+        private void ElevatedInputStateChanged(int bridgeGeneration, bool connected, string state)
+        {
+            BeginOnUi(delegate
+            {
+                if (exiting || bridgeGeneration != elevatedInputBridgeGeneration)
+                {
+                    return;
+                }
+
+                inputPrivilegeState = state;
+                UpdateInputPrivilegeMenu();
+                DiagnosticLog.Write("입력 권한 상태: " + state);
+            });
+        }
+
+        private void ElevatedInputError(int bridgeGeneration, string message)
+        {
+            BeginOnUi(delegate
+            {
+                if (exiting || bridgeGeneration != elevatedInputBridgeGeneration)
+                {
+                    return;
+                }
+
+                DiagnosticLog.Write("관리자 입력 도우미 오류: " + message);
+                ShowCaptureError(message + " 일반 입력 감지는 계속 동작합니다.");
+            });
+        }
+
+        private void StopElevatedInputHelper()
+        {
+            elevatedInputBridgeGeneration++;
+            ElevatedInputBridge bridge = elevatedInputBridge;
+            elevatedInputBridge = null;
+            if (bridge != null)
+            {
+                bridge.Dispose();
+            }
+        }
+
+        private void UpdateInputPrivilegeMenu()
+        {
+            if (trayIcon == null || trayIcon.ContextMenuStrip == null)
+            {
+                return;
+            }
+
+            ToolStripItem status = trayIcon.ContextMenuStrip.Items["InputPrivilegeStatus"];
+            if (status != null)
+            {
+                status.Text = "입력 권한: " + inputPrivilegeState;
+            }
+
+            ToolStripMenuItem action =
+                trayIcon.ContextMenuStrip.Items["ElevatedInputAction"] as ToolStripMenuItem;
+            if (action != null)
+            {
+                action.Enabled = !PrivilegeManager.IsAdministrator();
+                action.Text = elevatedInputBridge != null && elevatedInputBridge.IsConnected
+                    ? "관리자 입력 도우미 다시 시작"
+                    : "관리자 입력 도우미 시작";
+            }
         }
 
         private void ReplaceCaptureWorker(bool forceCompatibility, string reason)
@@ -465,6 +592,7 @@ namespace QuickWindowCapture
 
             exiting = true;
             eventTimer.Stop();
+            StopElevatedInputHelper();
             keyboardHook.Dispose();
             if (rawInputMonitor != null)
             {

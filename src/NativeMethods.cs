@@ -83,6 +83,18 @@ namespace QuickWindowCapture
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetDefaultDllDirectories(uint directoryFlags);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetNamedPipeClientProcessId(
+            IntPtr pipeHandle,
+            out uint clientProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetNamedPipeServerProcessId(
+            IntPtr pipeHandle,
+            out uint serverProcessId);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DestroyIcon(IntPtr iconHandle);

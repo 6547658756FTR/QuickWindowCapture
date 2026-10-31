@@ -261,8 +261,8 @@ namespace QuickWindowCapture
                 Location = new Point(31, 592),
                 Size = new Size(589, 34),
                 Text = PrivilegeManager.IsAdministrator()
-                    ? "현재 관리자 권한으로 실행 중입니다. 해제하면 다음 실행부터 일반 권한으로 시작합니다."
-                    : "켜면 저장 직후 UAC 확인 후 관리자 권한으로 다시 시작합니다. 자동 실행 시에도 UAC 확인이 표시됩니다."
+                    ? "현재 앱 전체가 관리자 권한입니다. 다음 일반 실행부터 이 옵션은 입력 감지 도우미만 관리자 권한으로 시작합니다."
+                    : "켜면 저장 직후 UAC 확인 후 입력 감지 도우미만 관리자 권한으로 시작합니다. 캡처·저장·설정은 일반 권한으로 유지됩니다."
             };
             Controls.Add(privilegeHint);
 
