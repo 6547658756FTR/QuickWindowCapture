@@ -12,6 +12,10 @@ namespace QuickWindowCapture
         [STAThread]
         private static void Main(string[] args)
         {
+            // This must be the first native-policy operation. The application has
+            // no private DLL dependencies, so every P/Invoke is restricted to the
+            // trusted Windows system directory before UI or capture components load.
+            NativeMethods.RequireSystemDllSearchOnly();
             PrivilegeManager.WaitForPreviousInstance(args);
             NativeMethods.EnableBestDpiAwareness();
             Application.EnableVisualStyles();

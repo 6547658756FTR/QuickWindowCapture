@@ -7,5 +7,6 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyProduct("빠른 창 캡처")]
 [assembly: AssemblyCopyright("Copyright © 2026")]
 [assembly: ComVisible(false)]
-[assembly: AssemblyVersion("1.6.4.0")]
-[assembly: AssemblyFileVersion("1.6.4.0")]
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+[assembly: AssemblyVersion("1.7.0.0")]
+[assembly: AssemblyFileVersion("1.7.0.0")]

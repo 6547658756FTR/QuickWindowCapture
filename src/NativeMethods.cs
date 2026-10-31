@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 namespace QuickWindowCapture
@@ -11,6 +12,7 @@ namespace QuickWindowCapture
         internal const int WM_SYSKEYDOWN = 0x0104;
         internal const int WM_SYSKEYUP = 0x0105;
         internal const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        private const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
 
         internal delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -77,6 +79,10 @@ namespace QuickWindowCapture
         [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
         internal static extern IntPtr GetModuleHandle(string moduleName);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetDefaultDllDirectories(uint directoryFlags);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DestroyIcon(IntPtr iconHandle);
@@ -104,6 +110,16 @@ namespace QuickWindowCapture
             }
             catch (EntryPointNotFoundException)
             {
+            }
+        }
+
+        internal static void RequireSystemDllSearchOnly()
+        {
+            if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "안전한 Windows 시스템 DLL 검색 경로를 설정하지 못했습니다.");
             }
         }
     }

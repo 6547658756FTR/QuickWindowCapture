@@ -42,7 +42,7 @@ namespace QuickWindowCapture
             dispatcher = new Control();
             dispatcher.CreateControl();
             ReplaceCaptureWorker(false, null);
-            DiagnosticLog.Write("빠른 창 캡처 1.6.4 시작");
+            DiagnosticLog.Write("빠른 창 캡처 1.7.0 시작");
 
             ContextMenuStrip menu = new ContextMenuStrip();
             ToolStripMenuItem statusItem = new ToolStripMenuItem("단축키: " + settings.GetHotkeyDisplayName());
